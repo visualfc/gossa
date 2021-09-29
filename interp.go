@@ -58,6 +58,7 @@ import (
 	"github.com/goplus/reflectx"
 	"github.com/goplus/xtypes"
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/types/typeutil"
 )
 
 type continuation int
@@ -99,7 +100,8 @@ type interpreter struct {
 	sizes       types.Sizes         // the effective type-sizing function
 	goroutines  int32               // atomically updated
 	ctx         xtypes.Context
-	types       map[types.Type]reflect.Type
+	types       typeutil.Map
+	rtypes      map[reflect.Type]types.Type
 	caller      *frame
 	typesMutex  sync.RWMutex
 	callerMutex sync.RWMutex
@@ -112,10 +114,8 @@ func (i *interpreter) findType(t reflect.Type) (types.Type, bool) {
 }
 
 func (i *interpreter) findTypeHelper(t reflect.Type) (types.Type, bool) {
-	for k, v := range i.types {
-		if v == t {
-			return k, true
-		}
+	if t, ok := i.rtypes[t]; ok {
+		return t, true
 	}
 	if t.Kind() == reflect.Ptr {
 		if typ, ok := i.findTypeHelper(t.Elem()); ok {
@@ -140,22 +140,21 @@ func isUntyped(typ types.Type) bool {
 }
 
 func (i *interpreter) toType(typ types.Type) reflect.Type {
-	i.typesMutex.RLock()
-	tt, ok := i.types[typ]
-	i.typesMutex.RUnlock()
-	if ok {
-		return tt
+	if isUntyped(typ) {
+		typ = types.Default(typ)
 	}
 	i.typesMutex.Lock()
 	defer i.typesMutex.Unlock()
-	if isUntyped(typ) {
-		typ = types.Default(typ)
+	tt := i.types.At(typ)
+	if tt != nil {
+		return tt.(reflect.Type)
 	}
 	t, err := xtypes.ToType(typ, i.ctx)
 	if err != nil {
 		panic(fmt.Sprintf("toType %v error: %v", typ, err))
 	}
-	i.types[typ] = t
+	i.types.Set(typ, t)
+	i.rtypes[t] = typ
 	return t
 }
 
@@ -1114,8 +1113,8 @@ func Interpret(mainpkg *ssa.Package, mode Mode, entry string) (exitCode int) {
 		prog:       mainpkg.Prog,
 		globals:    make(map[ssa.Value]value),
 		mode:       mode,
+		rtypes:     make(map[reflect.Type]types.Type),
 		goroutines: 1,
-		types:      make(map[types.Type]reflect.Type),
 	}
 	i.ctx = xtypes.NewContext(func(mtyp reflect.Type, fn *types.Func) func([]reflect.Value) []reflect.Value {
 		typ := fn.Type().(*types.Signature).Recv().Type()
@@ -1168,13 +1167,8 @@ func Interpret(mainpkg *ssa.Package, mode Mode, entry string) (exitCode int) {
 		}
 		return nil, false
 	}, func(typ types.Type) (reflect.Type, bool) {
-		if t, ok := i.types[typ]; ok {
-			return t, true
-		}
-		for k, v := range i.types {
-			if types.Identical(k, typ) {
-				return v, true
-			}
+		if t := i.types.At(typ); t != nil {
+			return t.(reflect.Type), true
 		}
 		return nil, false
 	})
