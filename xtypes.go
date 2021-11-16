@@ -10,6 +10,7 @@ import (
 
 	"github.com/goplus/reflectx"
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/types/typeutil"
 )
 
 var (
@@ -145,17 +146,24 @@ type FindMethod interface {
 }
 
 type TypesRecord struct {
-	find FindMethod
+	find   FindMethod
+	Rcache map[reflect.Type]types.Type
+	Tcache *typeutil.Map
 }
 
 func NewTypesRecord(find FindMethod) *TypesRecord {
 	return &TypesRecord{
-		find: find,
+		find:   find,
+		Rcache: make(map[reflect.Type]types.Type),
+		Tcache: &typeutil.Map{},
 	}
 }
 
 func (r *TypesRecord) ToType(typ types.Type) reflect.Type {
 	if rt := inst.Tcache.At(typ); rt != nil {
+		return rt.(reflect.Type)
+	}
+	if rt := r.Tcache.At(typ); rt != nil {
 		return rt.(reflect.Type)
 	}
 	var rt reflect.Type
@@ -194,8 +202,8 @@ func (r *TypesRecord) ToType(typ types.Type) reflect.Type {
 	default:
 		panic("unreachable")
 	}
-	inst.Tcache.Set(typ, rt)
-	inst.Rcache[rt] = typ
+	r.Tcache.Set(typ, rt)
+	r.Rcache[rt] = typ
 	return rt
 }
 
@@ -233,8 +241,8 @@ func (r *TypesRecord) toNamedType(t *types.Named) reflect.Type {
 	if numMethods == 0 {
 		styp := toMockType(t.Underlying())
 		typ := reflectx.NamedTypeOf(name.Pkg().Path(), name.Name(), styp)
-		inst.Tcache.Set(t, typ)
-		inst.Rcache[typ] = t
+		r.Tcache.Set(t, typ)
+		r.Rcache[typ] = t
 		utype := r.ToType(ut)
 		reflectx.SetUnderlying(typ, utype)
 		return typ
@@ -251,8 +259,8 @@ func (r *TypesRecord) toNamedType(t *types.Named) reflect.Type {
 		etyp := toMockType(ut)
 		styp := reflectx.NamedTypeOf(name.Pkg().Path(), name.Name(), etyp)
 		typ := reflectx.NewMethodSet(styp, mcount, pcount)
-		inst.Tcache.Set(t, typ)
-		inst.Rcache[typ] = t
+		r.Tcache.Set(t, typ)
+		r.Rcache[typ] = t
 		utype := r.ToType(ut)
 		reflectx.SetUnderlying(typ, utype)
 		if typ.Kind() != reflect.Interface {

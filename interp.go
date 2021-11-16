@@ -117,6 +117,9 @@ func (i *Interp) findType(t reflect.Type) (types.Type, bool) {
 }
 
 func (i *Interp) findTypeHelper(t reflect.Type) (types.Type, bool) {
+	if rt, ok := i.record.Rcache[t]; ok {
+		return rt, true
+	}
 	if rt, ok := inst.Rcache[t]; ok {
 		return rt, true
 	}
@@ -197,6 +200,9 @@ func isUntyped(typ types.Type) bool {
 func (i *Interp) toType(typ types.Type) reflect.Type {
 	i.typesMutex.Lock()
 	defer i.typesMutex.Unlock()
+	if r := i.record.Tcache.At(typ); r != nil {
+		return r.(reflect.Type)
+	}
 	if r := inst.Tcache.At(typ); r != nil {
 		return r.(reflect.Type)
 	}
