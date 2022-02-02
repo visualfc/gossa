@@ -240,6 +240,7 @@ type frame struct {
 	env              map[ssa.Value]value // dynamic values of SSA variables
 	locals           map[ssa.Value]reflect.Value
 	mapUnderscoreKey map[types.Type]bool
+	typeParam        map[types.Type]types.Type
 	defers           *deferred
 	result           value
 	panicking        bool
@@ -278,7 +279,7 @@ func (fr *frame) get(key ssa.Value) value {
 	case *ssa.Builtin:
 		return key
 	case *ssa.Const:
-		c := constValue(fr.i, key)
+		c := fr.constValue(key)
 		if c == nil {
 			return c
 		}
@@ -922,12 +923,12 @@ func call(i *Interp, caller *frame, callpos token.Pos, fn value, args []value, s
 		if fn == nil {
 			panic("call of nil function") // nil of func type
 		}
-		return callSSA(i, caller, callpos, fn, args, nil)
+		return callSSA(i, caller, callpos, fn, args, nil, ssaArgs)
 	case *closure:
 		if fn.Fn == nil {
 			panic("call of nil closure function") // nil of func type
 		}
-		return callSSA(i, caller, callpos, fn.Fn, args, fn.Env)
+		return callSSA(i, caller, callpos, fn.Fn, args, fn.Env, ssaArgs)
 	case *ssa.Builtin:
 		return callBuiltin(i, caller, callpos, fn, args, ssaArgs)
 	default:
@@ -949,7 +950,7 @@ func loc(fset *token.FileSet, pos token.Pos) string {
 // and lexical environment env, returning its result.
 // callpos is the position of the callsite.
 //
-func callSSA(i *Interp, caller *frame, callpos token.Pos, fn *ssa.Function, args []value, env []value) value {
+func callSSA(i *Interp, caller *frame, callpos token.Pos, fn *ssa.Function, args []value, env []value, ssaArgs []ssa.Value) value {
 	if i.mode&EnableTracing != 0 {
 		fset := fn.Prog.Fset
 		// TODO(adonovan): fix: loc() lies for external functions.
@@ -1019,6 +1020,7 @@ func callSSA(i *Interp, caller *frame, callpos token.Pos, fn *ssa.Function, args
 	fr.block = fn.Blocks[0]
 	fr.locals = make(map[ssa.Value]reflect.Value)
 	fr.mapUnderscoreKey = make(map[types.Type]bool)
+	fr.typeParam = make(map[types.Type]types.Type)
 	for _, l := range fn.Locals {
 		typ := i.toType(deref(l.Type()))
 		fr.locals[l] = reflect.New(typ).Elem()   //zero(deref(l.Type()))
@@ -1026,6 +1028,9 @@ func callSSA(i *Interp, caller *frame, callpos token.Pos, fn *ssa.Function, args
 	}
 	for i, p := range fn.Params {
 		fr.env[p] = args[i]
+		if t, ok := p.Type().(*ssa.TypeParam); ok {
+			fr.typeParam[t] = ssaArgs[i].Type()
+		}
 	}
 	for i, fv := range fn.FreeVars {
 		fr.env[fv] = env[i]

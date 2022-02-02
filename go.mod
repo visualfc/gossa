@@ -8,3 +8,5 @@ require (
 	github.com/goplus/reflectx v0.8.2
 	golang.org/x/tools v0.1.8
 )
+
+replace golang.org/x/tools => ../tools

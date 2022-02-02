@@ -227,6 +227,8 @@ func (r *TypesRecord) ToType(typ types.Type) reflect.Type {
 		in := r.ToTypeList(t.Params())
 		out := r.ToTypeList(t.Results())
 		rt = reflect.FuncOf(in, out, t.Variadic())
+	case *ssa.TypeParam:
+		rt = r.ToType(t.Constraint())
 	default:
 		panic("unreachable")
 	}

@@ -34,13 +34,17 @@ type exitPanic int
 
 // constValue returns the value of the constant with the
 // dynamic type tag appropriate for c.Type().
-func constValue(i *Interp, c *ssa.Const) value {
+func (fr *frame) constValue(c *ssa.Const) value {
 	if c.IsNil() {
 		t := c.Type()
-		return reflect.Zero(i.toType(t)).Interface()
+		return reflect.Zero(fr.i.toType(t)).Interface()
 		// return zero(c.Type()) // typed nil
 	}
-	if t, ok := c.Type().Underlying().(*types.Basic); ok {
+	typ := c.Type()
+	if t, ok := fr.typeParam[typ]; ok {
+		typ = t
+	}
+	if t, ok := typ.Underlying().(*types.Basic); ok {
 		// TODO(adonovan): eliminate untyped constants from SSA form.
 		switch t.Kind() {
 		case types.Bool, types.UntypedBool:
