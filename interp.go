@@ -482,7 +482,13 @@ func (i *Interp) visitInstr(fr *frame, instr ssa.Instruction) (func(), continuat
 	case *ssa.MakeInterface:
 		typ := i.toType(instr.Type())
 		v := reflect.New(typ).Elem()
-		xtyp := i.toType(instr.X.Type())
+
+		ixtyp := instr.X.Type()
+		if t, ok := fr.typeParam[ixtyp]; ok {
+			ixtyp = t
+		}
+
+		xtyp := i.toType(ixtyp)
 		x := fr.get(instr.X)
 		var vx reflect.Value
 		switch x.(type) {
@@ -622,7 +628,11 @@ func (i *Interp) visitInstr(fr *frame, instr ssa.Instruction) (func(), continuat
 		//*addr = zero(deref(instr.Type()))
 
 	case *ssa.MakeSlice:
-		typ := i.toType(instr.Type())
+		ityp := instr.Type()
+		if t, ok := fr.typeParam[ityp]; ok {
+			ityp = t
+		}
+		typ := i.toType(ityp)
 		Len := asInt(fr.get(instr.Len))
 		if Len < 0 || Len >= maxMemLen {
 			panic(runtimeError("makeslice: len out of range"))
@@ -1028,8 +1038,8 @@ func callSSA(i *Interp, caller *frame, callpos token.Pos, fn *ssa.Function, args
 	}
 	for i, p := range fn.Params {
 		fr.env[p] = args[i]
-		if t, ok := p.Type().(*ssa.TypeParam); ok {
-			fr.typeParam[t] = ssaArgs[i].Type()
+		if ptyp, styp := p.Type(), ssaArgs[i].Type(); ptyp != styp {
+			fr.checkTypeParam(ptyp, styp)
 		}
 	}
 	for i, fv := range fn.FreeVars {
@@ -1043,6 +1053,25 @@ func callSSA(i *Interp, caller *frame, callpos token.Pos, fn *ssa.Function, args
 	fr.block = nil
 	fr.locals = nil
 	return fr.result
+}
+
+func (fr *frame) checkTypeParam(ptyp types.Type, styp types.Type) {
+	fr.typeParam[ptyp] = styp
+	switch t := ptyp.(type) {
+	case *ssa.TypeParam:
+		if etyp, ok := ssa.TypeParamEmbeddedType(ptyp); ok {
+			fr.checkTypeParam(etyp, styp)
+		}
+	case *types.Slice:
+		fr.checkTypeParam(t.Elem(), styp.(*types.Slice).Elem())
+	case *types.Array:
+		fr.checkTypeParam(t.Elem(), styp.(*types.Array).Elem())
+	case *types.Pointer:
+		fr.checkTypeParam(t.Elem(), styp.(*types.Pointer).Elem())
+	case *types.Map:
+		fr.checkTypeParam(t.Key(), styp.(*types.Map).Key())
+		fr.checkTypeParam(t.Elem(), styp.(*types.Map).Elem())
+	}
 }
 
 func callReflect(i *Interp, caller *frame, callpos token.Pos, fn reflect.Value, args []value, env []value) value {
