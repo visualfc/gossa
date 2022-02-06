@@ -190,7 +190,11 @@ func (r *TypesRecord) saveType(typ types.Type, rt reflect.Type) {
 	r.rcache[rt] = typ
 }
 
-func (r *TypesRecord) ToType(typ types.Type) reflect.Type {
+type FindTypeParam interface {
+	FindTypeParam(typ *types.TypeParam) types.Type
+}
+
+func (r *TypesRecord) ToType(typ types.Type, ftp FindTypeParam) reflect.Type {
 	if rt, ok := r.LookupReflect(typ); ok {
 		return rt
 	}
@@ -202,33 +206,37 @@ func (r *TypesRecord) ToType(typ types.Type) reflect.Type {
 			rt = basicTypes[kind]
 		}
 	case *types.Pointer:
-		elem := r.ToType(t.Elem())
+		elem := r.ToType(t.Elem(), ftp)
 		rt = reflect.PtrTo(elem)
 	case *types.Slice:
-		elem := r.ToType(t.Elem())
+		elem := r.ToType(t.Elem(), ftp)
 		rt = reflect.SliceOf(elem)
 	case *types.Array:
-		elem := r.ToType(t.Elem())
+		elem := r.ToType(t.Elem(), ftp)
 		rt = reflect.ArrayOf(int(t.Len()), elem)
 	case *types.Map:
-		key := r.ToType(t.Key())
-		elem := r.ToType(t.Elem())
+		key := r.ToType(t.Key(), ftp)
+		elem := r.ToType(t.Elem(), ftp)
 		rt = reflect.MapOf(key, elem)
 	case *types.Chan:
-		elem := r.ToType(t.Elem())
+		elem := r.ToType(t.Elem(), ftp)
 		rt = reflect.ChanOf(toReflectChanDir(t.Dir()), elem)
 	case *types.Struct:
-		rt = r.toStructType(t)
+		rt = r.toStructType(t, ftp)
 	case *types.Named:
-		rt = r.toNamedType(t)
+		rt = r.toNamedType(t, ftp)
 	case *types.Interface:
-		rt = r.toInterfaceType(t)
+		rt = r.toInterfaceType(t, ftp)
 	case *types.Signature:
-		in := r.ToTypeList(t.Params())
-		out := r.ToTypeList(t.Results())
+		in := r.ToTypeList(t.Params(), ftp)
+		out := r.ToTypeList(t.Results(), ftp)
 		rt = reflect.FuncOf(in, out, t.Variadic())
 	case *ssa.TypeParam:
-		rt = r.ToType(t.Constraint())
+		if ftp != nil {
+			rt = r.ToType(ftp.FindTypeParam(t), ftp)
+		} else {
+			rt = r.ToType(t.Constraint(), ftp)
+		}
 	default:
 		panic("unreachable")
 	}
@@ -236,7 +244,7 @@ func (r *TypesRecord) ToType(typ types.Type) reflect.Type {
 	return rt
 }
 
-func (r *TypesRecord) toInterfaceType(t *types.Interface) reflect.Type {
+func (r *TypesRecord) toInterfaceType(t *types.Interface, ftp FindTypeParam) reflect.Type {
 	n := t.NumMethods()
 	if n == 0 {
 		return tyEmptyInterface
@@ -244,7 +252,7 @@ func (r *TypesRecord) toInterfaceType(t *types.Interface) reflect.Type {
 	ms := make([]reflect.Method, n, n)
 	for i := 0; i < n; i++ {
 		fn := t.Method(i)
-		mtyp := r.ToType(fn.Type())
+		mtyp := r.ToType(fn.Type(), ftp)
 		ms[i] = reflect.Method{
 			Name: fn.Name(),
 			Type: mtyp,
@@ -256,14 +264,14 @@ func (r *TypesRecord) toInterfaceType(t *types.Interface) reflect.Type {
 	return reflectx.InterfaceOf(nil, ms)
 }
 
-func (r *TypesRecord) toNamedType(t *types.Named) reflect.Type {
+func (r *TypesRecord) toNamedType(t *types.Named, ftp FindTypeParam) reflect.Type {
 	ut := t.Underlying()
 	name := t.Obj()
 	if name.Pkg() == nil {
 		if name.Name() == "error" {
 			return tyErrorInterface
 		}
-		return r.ToType(ut)
+		return r.ToType(ut, ftp)
 	}
 	methods := IntuitiveMethodSet(t)
 	numMethods := len(methods)
@@ -271,7 +279,7 @@ func (r *TypesRecord) toNamedType(t *types.Named) reflect.Type {
 		styp := toMockType(t.Underlying())
 		typ := reflectx.NamedTypeOf(name.Pkg().Path(), name.Name(), styp)
 		r.saveType(t, typ)
-		utype := r.ToType(ut)
+		utype := r.ToType(ut, ftp)
 		reflectx.SetUnderlying(typ, utype)
 		return typ
 	} else {
@@ -288,23 +296,23 @@ func (r *TypesRecord) toNamedType(t *types.Named) reflect.Type {
 		styp := reflectx.NamedTypeOf(name.Pkg().Path(), name.Name(), etyp)
 		typ := reflectx.NewMethodSet(styp, mcount, pcount)
 		r.saveType(t, typ)
-		utype := r.ToType(ut)
+		utype := r.ToType(ut, ftp)
 		reflectx.SetUnderlying(typ, utype)
 		if typ.Kind() != reflect.Interface {
-			r.setMethods(typ, methods)
+			r.setMethods(typ, methods, ftp)
 		}
 		return typ
 	}
 }
 
-func (r *TypesRecord) toStructType(t *types.Struct) reflect.Type {
+func (r *TypesRecord) toStructType(t *types.Struct, ftp FindTypeParam) reflect.Type {
 	n := t.NumFields()
 	if n == 0 {
 		return tyEmptyStruct
 	}
 	flds := make([]reflect.StructField, n)
 	for i := 0; i < n; i++ {
-		flds[i] = r.toStructField(t.Field(i), t.Tag(i))
+		flds[i] = r.toStructField(t.Field(i), t.Tag(i), ftp)
 	}
 	typ := reflectx.StructOf(flds)
 	methods := IntuitiveMethodSet(t)
@@ -319,14 +327,14 @@ func (r *TypesRecord) toStructType(t *types.Struct) reflect.Type {
 			pcount++
 		}
 		typ = reflectx.NewMethodSet(typ, mcount, pcount)
-		r.setMethods(typ, methods)
+		r.setMethods(typ, methods, ftp)
 	}
 	return typ
 }
 
-func (r *TypesRecord) toStructField(v *types.Var, tag string) reflect.StructField {
+func (r *TypesRecord) toStructField(v *types.Var, tag string, ftp FindTypeParam) reflect.StructField {
 	name := v.Name()
-	typ := r.ToType(v.Type())
+	typ := r.ToType(v.Type(), ftp)
 	fld := reflect.StructField{
 		Name:      name,
 		Type:      typ,
@@ -339,14 +347,14 @@ func (r *TypesRecord) toStructField(v *types.Var, tag string) reflect.StructFiel
 	return fld
 }
 
-func (r *TypesRecord) ToTypeList(tuple *types.Tuple) []reflect.Type {
+func (r *TypesRecord) ToTypeList(tuple *types.Tuple, ftp FindTypeParam) []reflect.Type {
 	n := tuple.Len()
 	if n == 0 {
 		return nil
 	}
 	list := make([]reflect.Type, n, n)
 	for i := 0; i < n; i++ {
-		list[i] = r.ToType(tuple.At(i).Type())
+		list[i] = r.ToType(tuple.At(i).Type(), ftp)
 	}
 	return list
 }
@@ -356,14 +364,14 @@ func isPointer(typ types.Type) bool {
 	return ok
 }
 
-func (r *TypesRecord) setMethods(typ reflect.Type, methods []*types.Selection) {
+func (r *TypesRecord) setMethods(typ reflect.Type, methods []*types.Selection, ftp FindTypeParam) {
 	numMethods := len(methods)
 	var ms []reflectx.Method
 	for i := 0; i < numMethods; i++ {
 		fn := methods[i].Obj().(*types.Func)
 		sig := methods[i].Type().(*types.Signature)
 		pointer := isPointer(sig.Recv().Type())
-		mtyp := r.ToType(sig)
+		mtyp := r.ToType(sig, ftp)
 		var mfn func(args []reflect.Value) []reflect.Value
 		idx := methods[i].Index()
 		if len(idx) > 1 {
@@ -408,8 +416,8 @@ func toReflectChanDir(d types.ChanDir) reflect.ChanDir {
 	return 0
 }
 
-func (r *TypesRecord) LoadType(typ types.Type) reflect.Type {
-	return r.ToType(typ)
+func (r *TypesRecord) LoadType(typ types.Type, ftp FindTypeParam) reflect.Type {
+	return r.ToType(typ, ftp)
 }
 
 func (r *TypesRecord) Load(pkg *ssa.Package) {
@@ -420,7 +428,7 @@ func (r *TypesRecord) Load(pkg *ssa.Package) {
 			continue
 		}
 		checked[typ] = true
-		r.LoadType(typ)
+		r.LoadType(typ, nil)
 	}
 }
 
