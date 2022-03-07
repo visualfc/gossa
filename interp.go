@@ -234,10 +234,19 @@ type frame struct {
 	env              map[ssa.Value]value // dynamic values of SSA variables
 	locals           map[ssa.Value]reflect.Value
 	mapUnderscoreKey map[types.Type]bool
+	stack            []value
 	defers           *deferred
 	result           value
 	panicking        bool
 	panic            interface{}
+}
+
+func (r *frame) reg(i int) value {
+	return r.stack[i]
+}
+
+func (r *frame) setReg(i int, v value) {
+	r.stack[i] = v
 }
 
 func (fr *frame) get(key ssa.Value) value {
@@ -928,28 +937,87 @@ func (i *Interp) callFunction(caller *frame, callpos token.Pos, fn *ssa.Function
 		caller: caller, // for panic/recover
 		pfn:    i.funcs[fn],
 	}
-	fr.env = make(map[ssa.Value]value)
+	//fr.stack = make([]value, fr.pfn.valueCount, fr.pfn.valueCount)
+	//copy(fr.stack, fr.pfn.values)
+	fr.stack = append([]value{}, fr.pfn.values...)
+	// fr.env = make(map[ssa.Value]value)
 	fr.block = fr.pfn.MainBlock
-	fr.locals = make(map[ssa.Value]reflect.Value)
-	fr.mapUnderscoreKey = make(map[types.Type]bool)
+	// fr.locals = make(map[ssa.Value]reflect.Value)
+	//fr.mapUnderscoreKey = make(map[types.Type]bool)
+	var index int
 	for _, l := range fn.Locals {
+		_ = l
 		typ := i.toType(deref(l.Type()))
-		fr.locals[l] = reflect.New(typ).Elem()   //zero(deref(l.Type()))
-		fr.env[l] = reflect.New(typ).Interface() //&fr.locals[i]
+		// fr.locals[l] = reflect.New(typ).Elem()   //zero(deref(l.Type()))
+		// fr.env[l] = reflect.New(typ).Interface() //&fr.locals[i]
+		fr.stack[index] = reflect.New(typ).Interface()
+		index++
 	}
 	for i, p := range fn.Params {
-		fr.env[p] = args[i]
+		_ = p
+		// fr.env[p] = args[i]
+		fr.stack[index] = args[i]
+		index++
 	}
 	for i, fv := range fn.FreeVars {
-		fr.env[fv] = env[i]
+		_ = fv
+		// fr.env[fv] = env[i]
+		fr.stack[index] = env[i]
+		index++
 	}
 	for fr.block != nil {
 		i.runFrame(fr)
 	}
 	// Destroy the locals to avoid accidental use after return.
-	fr.env = nil
+	//log.Println("======", fr.stack)
+	//fr.env = nil
 	fr.block = nil
-	fr.locals = nil
+	//fr.locals = nil
+	return fr.result
+}
+
+func (i *Interp) callFunctionEx(caller *frame, callpos token.Pos, fn *ssa.Function, pfn *Function, args []value, env []value) value {
+	fr := &frame{
+		i:      i,
+		caller: caller, // for panic/recover
+		pfn:    pfn,
+	}
+	//fr.stack = make([]value, fr.pfn.valueCount, fr.pfn.valueCount)
+	//copy(fr.stack, fr.pfn.values)
+	fr.stack = append([]value{}, fr.pfn.values...)
+	// fr.env = make(map[ssa.Value]value)
+	fr.block = fr.pfn.MainBlock
+	// fr.locals = make(map[ssa.Value]reflect.Value)
+	//fr.mapUnderscoreKey = make(map[types.Type]bool)
+	var index int
+	for _, l := range fn.Locals {
+		_ = l
+		typ := i.toType(deref(l.Type()))
+		// fr.locals[l] = reflect.New(typ).Elem()   //zero(deref(l.Type()))
+		// fr.env[l] = reflect.New(typ).Interface() //&fr.locals[i]
+		fr.stack[index] = reflect.New(typ).Interface()
+		index++
+	}
+	for i, p := range fn.Params {
+		_ = p
+		// fr.env[p] = args[i]
+		fr.stack[index] = args[i]
+		index++
+	}
+	for i, fv := range fn.FreeVars {
+		_ = fv
+		// fr.env[fv] = env[i]
+		fr.stack[index] = env[i]
+		index++
+	}
+	for fr.block != nil {
+		i.runFrame(fr)
+	}
+	// Destroy the locals to avoid accidental use after return.
+	//log.Println("======", fr.stack)
+	//fr.env = nil
+	fr.block = nil
+	//fr.locals = nil
 	return fr.result
 }
 
@@ -1023,20 +1091,30 @@ func (i *Interp) callSSA(caller *frame, callpos token.Pos, fn *ssa.Function, arg
 		caller: caller, // for panic/recover
 		pfn:    i.funcs[fn],
 	}
+	fr.stack = make([]value, fr.pfn.valueCount, fr.pfn.valueCount)
+	copy(fr.stack, fr.pfn.values)
+
 	fr.env = make(map[ssa.Value]value)
 	fr.block = fr.pfn.MainBlock
 	fr.locals = make(map[ssa.Value]reflect.Value)
 	fr.mapUnderscoreKey = make(map[types.Type]bool)
+	var index int
 	for _, l := range fn.Locals {
 		typ := i.toType(deref(l.Type()))
 		fr.locals[l] = reflect.New(typ).Elem()   //zero(deref(l.Type()))
 		fr.env[l] = reflect.New(typ).Interface() //&fr.locals[i]
+		fr.stack[index] = reflect.New(typ).Interface()
+		index++
 	}
 	for i, p := range fn.Params {
 		fr.env[p] = args[i]
+		fr.stack[index] = args[i]
+		index++
 	}
 	for i, fv := range fn.FreeVars {
 		fr.env[fv] = env[i]
+		fr.stack[index] = env[i]
+		index++
 	}
 	for fr.block != nil {
 		i.runFrame(fr)
@@ -1109,28 +1187,28 @@ func (i *Interp) callReflect(caller *frame, callpos token.Pos, fn reflect.Value,
 // control.
 //
 func (i *Interp) runFrame(fr *frame) {
-	if fr.pfn.Recover != nil {
-		defer func() {
-			if fr.block == nil {
-				return // normal return
-			}
-			if i.mode&DisableRecover != 0 {
-				return // let interpreter crash
-			}
-			fr.panicking = true
-			fr.panic = recover()
-			if i.mode&EnableTracing != 0 {
-				log.Printf("Panicking: %T %v.\n", fr.panic, fr.panic)
-			}
-			fr.runDefers()
-			fr.block = fr.pfn.Recover
-		}()
-	}
+	// if fr.pfn.Recover != nil {
+	// 	defer func() {
+	// 		if fr.block == nil {
+	// 			return // normal return
+	// 		}
+	// 		if i.mode&DisableRecover != 0 {
+	// 			return // let interpreter crash
+	// 		}
+	// 		fr.panicking = true
+	// 		fr.panic = recover()
+	// 		if i.mode&EnableTracing != 0 {
+	// 			log.Printf("Panicking: %T %v.\n", fr.panic, fr.panic)
+	// 		}
+	// 		fr.runDefers()
+	// 		fr.block = fr.pfn.Recover
+	// 	}()
+	// }
 
 	for {
-		if i.mode&EnableTracing != 0 {
-			log.Printf(".%v:\n", fr.block.Index)
-		}
+		// if i.mode&EnableTracing != 0 {
+		// 	log.Printf(".%v:\n", fr.block.Index)
+		// }
 	block:
 		for _, fn := range fr.block.Instrs {
 			var k int

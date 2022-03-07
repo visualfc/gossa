@@ -65,10 +65,35 @@ type FuncBlock struct {
 }
 
 type Function struct {
-	Fn        *ssa.Function
-	Blocks    map[*ssa.BasicBlock]*FuncBlock
-	MainBlock *FuncBlock
-	Recover   *FuncBlock
+	intp       *Interp
+	Fn         *ssa.Function
+	Blocks     map[*ssa.BasicBlock]*FuncBlock
+	MainBlock  *FuncBlock
+	Recover    *FuncBlock
+	valueIndex map[ssa.Value]int
+	valueCount int
+	values     []value
+}
+
+func (p *Function) getIndex(v ssa.Value) int {
+	if i, ok := p.valueIndex[v]; ok {
+		return i
+	}
+	i := p.valueCount
+	p.valueIndex[v] = i
+	p.valueCount++
+	switch v := v.(type) {
+	case *constValue:
+		p.values = append(p.values, v.Value)
+	case *ssa.Const:
+		p.values = append(p.values, constToValue(p.intp, v))
+	case *ssa.Global:
+		g, _ := globalToValue(p.intp, v)
+		p.values = append(p.values, g)
+	default:
+		p.values = append(p.values, nil)
+	}
+	return i
 }
 
 func findExternFunc(interp *Interp, fn *ssa.Function) (ext reflect.Value, ok bool) {
@@ -88,6 +113,11 @@ func findExternFunc(interp *Interp, fn *ssa.Function) (ext reflect.Value, ok boo
 }
 
 func makeInstr(interp *Interp, pfn *Function, instr ssa.Instruction) func(fr *frame, k *int) {
+	var index = -1
+	if v, ok := instr.(ssa.Value); ok {
+		index = pfn.getIndex(v)
+	}
+	_ = index
 	switch instr := instr.(type) {
 	case *ssa.Alloc:
 		if instr.Heap {
@@ -112,16 +142,24 @@ func makeInstr(interp *Interp, pfn *Function, instr ssa.Instruction) func(fr *fr
 			}
 		}
 	case *ssa.Call:
-		return makeCallInstr(interp, instr, instr.Call)
+		return makeCallInstr(interp, pfn, instr, instr.Call)
 	case *ssa.BinOp:
+		//log.Println("binOp", instr, pfn.getIndex(instr.X), pfn.getIndex(instr.Y))
+		i, ix, iy := pfn.getIndex(instr), pfn.getIndex(instr.X), pfn.getIndex(instr.Y)
 		switch instr.Op {
 		case token.ADD:
 			return func(fr *frame, k *int) {
-				fr.env[instr] = opADD(fr.get(instr.X), fr.get(instr.Y))
+				// fr.env[instr] = opADD(fr.get(instr.X), fr.get(instr.Y))
+				// fr.stack[i] = opADD(fr.stack[ix], fr.stack[iy])
+				//fr.stack[i] = fr.reg(ix).(int) + fr.reg(iy).(int)
+				fr.setReg(i, fr.reg(ix).(int)+fr.reg(iy).(int))
 			}
 		case token.SUB:
 			return func(fr *frame, k *int) {
-				fr.env[instr] = opSUB(fr.get(instr.X), fr.get(instr.Y))
+				// fr.env[instr] = opSUB(fr.get(instr.X), fr.get(instr.Y))
+				// fr.stack[i] = opSUB(fr.stack[ix], fr.stack[iy])
+				//fr.stack[i] = fr.reg(ix).(int) - fr.reg(iy).(int)
+				fr.setReg(i, fr.reg(ix).(int)-fr.reg(iy).(int))
 			}
 		case token.MUL:
 			return func(fr *frame, k *int) {
@@ -187,7 +225,10 @@ func makeInstr(interp *Interp, pfn *Function, instr ssa.Instruction) func(fr *fr
 			}
 		case token.LSS:
 			return func(fr *frame, k *int) {
-				fr.env[instr] = opLSS(fr.get(instr.X), fr.get(instr.Y))
+				// fr.env[instr] = opLSS(fr.get(instr.X), fr.get(instr.Y))
+				// fr.stack[i] = opLSS(fr.stack[ix], fr.stack[iy])
+				//fr.stack[i] = fr.reg(ix).(int) < fr.reg(iy).(int)
+				fr.setReg(i, fr.reg(ix).(int) < fr.reg(iy).(int))
 			}
 		case token.LEQ:
 			return func(fr *frame, k *int) {
@@ -213,8 +254,12 @@ func makeInstr(interp *Interp, pfn *Function, instr ssa.Instruction) func(fr *fr
 			panic(fmt.Errorf("unreachable %v", instr.Op))
 		}
 	case *ssa.UnOp:
+		ii := pfn.getIndex(instr)
+		ix := pfn.getIndex(instr.X)
 		return func(fr *frame, k *int) {
-			fr.env[instr] = unop(instr, fr.get(instr.X))
+			//fr.env[instr] = unop(instr, fr.get(instr.X))
+			//fr.stack[ii] = unop(instr, fr.reg(ix))
+			fr.setReg(ii, unop(instr, fr.reg(ix)))
 		}
 	case *ssa.ChangeInterface:
 		return func(fr *frame, k *int) {
@@ -522,9 +567,10 @@ func makeInstr(interp *Interp, pfn *Function, instr ssa.Instruction) func(fr *fr
 			*k = kJump
 		}
 	case *ssa.If:
+		ic := pfn.getIndex(instr.Cond)
 		return func(fr *frame, k *int) {
 			succ := 1
-			if v := fr.get(instr.Cond); reflect.ValueOf(v).Bool() {
+			if v := fr.reg(ic); v.(bool) {
 				succ = 0
 			}
 			fr.prevBlock, fr.block = fr.block, fr.block.Succs[succ]
@@ -538,10 +584,13 @@ func makeInstr(interp *Interp, pfn *Function, instr ssa.Instruction) func(fr *fr
 				*k = kReturn
 			}
 		case 1:
+			ir := pfn.getIndex(instr.Results[0])
 			return func(fr *frame, k *int) {
-				fr.result = fr.get(instr.Results[0])
+				//fr.result = fr.get(instr.Results[0])
+				fr.result = fr.reg(ir)
 				fr.block = nil
 				*k = kReturn
+				//log.Println("===>", fr.pfn.Fn.Name(), ir, fr.result, fr.reg(ir))
 			}
 		default:
 			res := make([]value, n, n)
@@ -602,9 +651,11 @@ func makeInstr(interp *Interp, pfn *Function, instr ssa.Instruction) func(fr *fr
 				}
 			}
 		}
+		ia := pfn.getIndex(instr.Addr)
+		iv := pfn.getIndex(instr.Val)
 		return func(fr *frame, k *int) {
-			x := reflect.ValueOf(fr.get(instr.Addr))
-			val := fr.get(instr.Val)
+			x := reflect.ValueOf(fr.reg(ia)) //fr.get(instr.Addr))
+			val := fr.reg(iv)                //fr.get(instr.Val)
 			switch fn := val.(type) {
 			case *ssa.Function:
 				f := interp.makeFunc(fr, interp.toType(fn.Type()), fn)
@@ -658,13 +709,17 @@ func makeInstr(interp *Interp, pfn *Function, instr ssa.Instruction) func(fr *fr
 	}
 }
 
-func makeCallInstr(interp *Interp, instr ssa.Value, call ssa.CallCommon) func(fr *frame, k *int) {
+func makeCallInstr(interp *Interp, pfn *Function, instr ssa.Value, call ssa.CallCommon) func(fr *frame, k *int) {
 	pos := instr.Pos()
 	nargs := len(call.Args)
 	targs := make([]interface{}, nargs, nargs)
 	var fetch []int
 	var fetchMode bool
+	ii := pfn.getIndex(instr)
+	iargs := make([]int, nargs, nargs)
+	_ = iargs
 	for i := 0; i < nargs; i++ {
+		iargs[i] = pfn.getIndex(call.Args[i])
 		switch arg := call.Args[i].(type) {
 		case *ssa.Function:
 			targs[i] = interp.makeFuncEx(nil, interp.preToType(arg.Type()), arg, nil).Interface()
@@ -716,9 +771,9 @@ func makeCallInstr(interp *Interp, instr ssa.Value, call ssa.CallCommon) func(fr
 						return func(fr *frame, k *int) {
 							args := make([]value, nargs, nargs)
 							for i := 0; i < nargs; i++ {
-								args[i] = fr.env[call.Args[i]]
+								args[i] = fr.reg(iargs[i]) //fr.env[call.Args[i]]
 							}
-							fr.env[instr] = interp.callReflect(fr, pos, ext, args, nil)
+							fr.setReg(ii, interp.callReflect(fr, pos, ext, args, nil))
 						}
 					}
 				}
@@ -728,22 +783,28 @@ func makeCallInstr(interp *Interp, instr ssa.Value, call ssa.CallCommon) func(fr
 						fr.env[instr] = interp.callFunction(fr, pos, fn, nil, nil)
 					}
 				} else {
+					pfn := interp.funcs[fn]
 					if fetchMode {
 						return func(fr *frame, k *int) {
 							args := make([]value, nargs, nargs)
 							copy(args, targs)
 							for _, i := range fetch {
-								args[i] = fr.env[call.Args[i]]
+								//args[i] = fr.env[call.Args[i]]
+								args[i] = fr.reg(iargs[i])
 							}
-							fr.env[instr] = interp.callFunction(fr, pos, fn, args, nil)
+							// fr.env[instr] = interp.callFunction(fr, pos, fn, args, nil)
+							fr.setReg(ii, interp.callFunctionEx(fr, pos, fn, pfn, args, nil))
 						}
 					} else {
+						vargs := make([]value, nargs, nargs)
 						return func(fr *frame, k *int) {
-							args := make([]value, nargs, nargs)
+							args := append([]value{}, vargs...)
 							for i := 0; i < nargs; i++ {
-								args[i] = fr.env[call.Args[i]]
+								//args[i] = fr.env[call.Args[i]]
+								args[i] = fr.reg(iargs[i])
 							}
-							fr.env[instr] = interp.callFunction(fr, pos, fn, args, nil)
+							// fr.env[instr] = interp.callFunction(fr, pos, fn, args, nil)
+							fr.setReg(ii, interp.callFunctionEx(fr, pos, fn, pfn, args, nil))
 						}
 					}
 				}
@@ -767,9 +828,9 @@ func makeCallInstr(interp *Interp, instr ssa.Value, call ssa.CallCommon) func(fr
 					return func(fr *frame, k *int) {
 						args := make([]value, nargs, nargs)
 						for i := 0; i < nargs; i++ {
-							args[i] = fr.env[call.Args[i]]
+							args[i] = fr.reg(iargs[i])
 						}
-						fr.env[instr] = interp.callBuiltin(fr, pos, fn, args, call.Args)
+						interp.callBuiltin(fr, pos, fn, args, call.Args)
 					}
 				}
 			}

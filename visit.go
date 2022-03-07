@@ -65,8 +65,19 @@ func (visit *visitor) function(fn *ssa.Function) {
 		}
 		blocks := make(map[*ssa.BasicBlock]*FuncBlock)
 		pfn := &Function{
-			Fn:     fn,
-			Blocks: blocks,
+			intp:       visit.intp,
+			Fn:         fn,
+			Blocks:     blocks,
+			valueIndex: make(map[ssa.Value]int),
+		}
+		for _, l := range fn.Locals {
+			pfn.getIndex(l)
+		}
+		for _, p := range fn.Params {
+			pfn.getIndex(p)
+		}
+		for _, fv := range fn.FreeVars {
+			pfn.getIndex(fv)
 		}
 		visit.intp.funcs[fn] = pfn
 		var buf [32]*ssa.Value // avoid alloc in common case
