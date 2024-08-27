@@ -430,10 +430,22 @@ func main() {
 
 func TestPackagePatch(t *testing.T) {
 	ctx := igop.NewContext(0)
+	err := ctx.AddImportFile("github.com/qiniu/x/gsh", "src.go", `package gsh
+type Foo interface {
+	Bar() int
+}
+type App struct {}
+func (f *App) Bar() int {
+	return 1
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	RegisterPackagePatch(ctx, "github.com/qiniu/x/gsh", `package gsh
 import "github.com/qiniu/x/gsh"
 
-func Gopt_App_Gopx_GetWidget[T any](app any, name string) {
+func Gopt_App_Gopx_GetWidget[T any](app gsh.Foo, name string) {
 	var _ gsh.App
 	println(app, name)
 }
